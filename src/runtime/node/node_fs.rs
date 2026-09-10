@@ -946,14 +946,10 @@ mod _async_tasks {
                 scopeguard::guard(core::ptr::from_mut(self), |p| unsafe { Self::destroy(p) });
             // Move `result` out so the `global_object()` `&self` borrow can coexist
             // with consuming it below; the sentinel left behind is dropped in `destroy()`.
-            // Before the result reaches JS: an argument set whose job read
-            // into memory of its own copies those bytes into the caller's
-            // buffers now. `self.global_object.get()` rather than
-            // `self.global_object()`, so the borrow covers that field alone
-            // and leaves `self.args` free to take mutably.
             if let Ok(res) = &self.result
                 && let Some(bytes_read) = res.bytes_read()
             {
+                // The field, not `global_object()`: that borrows all of `self`.
                 let global = self.global_object.get();
                 self.args.write_back(global, bytes_read);
             }
@@ -1024,10 +1020,8 @@ mod _async_tasks {
         fn signal(&self) -> Option<&AbortSignal> {
             None
         }
-        /// Copies what a read produced into the caller's buffers, for an
-        /// argument set whose job had to read into memory of its own. JS
-        /// thread, after the syscall and before the result reaches JS. A no-op
-        /// for every other argument set.
+        /// Copies what a read produced into the caller's buffers, on the JS
+        /// thread, for an argument set whose job read into memory of its own.
         #[inline]
         fn write_back(&mut self, _global: &JSGlobalObject, _bytes_read: u64) {}
     }
@@ -1079,9 +1073,8 @@ mod _async_tasks {
         args::FdataSync,
         args::Fsync,
     );
-    // `readv` and `writev` share this argument set, so `write_back` is written
-    // once for both. It runs for `readv` only: `ret::Writev` is `ret::Write`,
-    // whose `bytes_read()` is `None`.
+    // `readv` and `writev` share this argument set. `write_back` reaches only
+    // `readv`: `ret::Writev` is `ret::Write`, whose `bytes_read()` is `None`.
     // SAFETY: as for `impl_fs_argument!`.
     unsafe impl ThreadIsolatedArg for args::FdVectorIo {}
     impl FsArgument for args::FdVectorIo {
@@ -1142,10 +1135,8 @@ mod _async_tasks {
     /// Each `ret::*` type implements this by forwarding to its inherent method.
     pub trait FsReturn {
         fn fs_to_js(self, global: &JSGlobalObject) -> JsResult<JSValue>;
-        /// Bytes a read produced, for an operation that fills the caller's
-        /// buffers. `None` for every other one, which is what keeps
-        /// [`FsArgument::write_back`] off the write direction: `ret::Writev`
-        /// is `ret::Write`, which reports nothing.
+        /// Bytes a read produced. `None` for a write, which is what keeps
+        /// [`FsArgument::write_back`] off `writev`.
         #[inline]
         fn bytes_read(&self) -> Option<u64> {
             None
@@ -1297,9 +1288,6 @@ mod _async_tasks {
             let _dispatch = js.tracker.dispatch(global_object);
 
             let success = this.result.is_ok();
-            // Before the result reaches JS: an argument set whose job read
-            // into memory of its own copies those bytes into the caller's
-            // buffers now.
             if let Ok(res) = &this.result
                 && let Some(bytes_read) = res.bytes_read()
             {

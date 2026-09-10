@@ -1297,8 +1297,7 @@ impl Valid {
 enum Span {
     /// The element's own bytes, of this length.
     Borrowed(usize),
-    /// A copy of them, because a pin does not keep the element's storage
-    /// mapped until the I/O completes.
+    /// A copy of them, for storage a pin does not hold.
     Copied(Vec<u8>),
 }
 
@@ -1383,9 +1382,9 @@ unsafe extern "C" fn append_buffer_span(
             span = Span::Copied(copy);
         }
     }
+    // The `out.spans` push below moves the `Vec`, not its bytes, so the
+    // pointer this takes stays good.
     let iovec = match &mut span {
-        // Moving the `Vec` into `out.spans` below moves the three words, not
-        // the bytes, so this pointer stays good.
         Span::Copied(copy) => bun_sys::platform_iovec_create(copy.as_mut_slice()),
         Span::Borrowed(_) => bun_sys::platform_iovec_create(slice),
     };
@@ -1454,13 +1453,10 @@ impl VectorArrayBuffer {
         }
     }
 
-    /// Copies what a read produced back into the elements whose bytes the job
-    /// could not write into directly. `bytes_read` is what the syscall
-    /// reported, which fills the spans in order.
-    ///
-    /// JS thread. Each element's range is read from the JS value again,
-    /// because the `resize()` or the `grow()` that made the copy necessary
-    /// also moved, shortened, or detached it.
+    /// Copies what a read produced back into the elements it could not write
+    /// into directly. `bytes_read` fills the spans in order. JS thread: each
+    /// range is read from the JS value again, because the `resize()` or
+    /// `grow()` that forced the copy also moved or shortened it.
     pub(crate) fn write_back(&mut self, global_object: &JSGlobalObject, bytes_read: u64) {
         let mut left = bytes_read;
         for (view, span) in self.views.iter().zip(self.spans.iter()) {

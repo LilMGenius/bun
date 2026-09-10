@@ -6941,17 +6941,11 @@ extern "C" JSC::EncodedJSValue Bun__REPL__formatValue(
     return JSC::JSValue::encode(result);
 }
 
-// True when `pin()` does not keep this view's bytes mapped for as long as a
-// borrow lives:
-//
-// - a resizable non-shared ArrayBuffer: `resize()` unmaps the pages it trims.
-// - a `WebAssembly.Memory`: `grow()` on a bounds-checked memory allocates a new
-//   block, copies into it, and frees the old one. JSC detaches a wasm memory's
-//   buffer whatever its pin count ("We allow detaching wasm memory ArrayBuffers
-//   even though they are locked", `ArrayBuffer::detach`).
-//
-// A SharedArrayBuffer, including a shared wasm memory, only ever grows in
-// place, so a borrow of one stays valid.
+// True when a pin does not keep this view's bytes mapped. `resize()` unmaps the
+// pages it trims, and a bounds-checked `WebAssembly.Memory` frees its block on
+// `grow()`: `ArrayBuffer::detach` ignores the pin count for one ("We allow
+// detaching wasm memory ArrayBuffers even though they are locked"). Shared
+// storage only ever grows in place.
 static bool pinCannotHold(JSC::JSArrayBufferView* view, JSC::ArrayBuffer* buffer)
 {
     if (buffer->isShared())
@@ -6972,9 +6966,8 @@ static bool pinCannotHold(JSC::JSArrayBufferView* view, JSC::ArrayBuffer* buffer
 // every pinned element with `JSC__JSValue__unpinArrayBuffer`. SharedArrayBuffer
 // is never detachable and never moves, so it is left unpinned.
 //
-// A pin holds the bytes of most buffers, not of all of them, so `append` is
-// told which elements it cannot hold (`volatileStorage`, see `pinCannotHold`).
-// The caller copies those and points the span at its own memory.
+// `volatileStorage` marks an element the pin does not hold (`pinCannotHold`);
+// the caller copies those.
 //
 // Returns 0 on success, 1 if the value is not a JSArray or an element is not
 // an ArrayBufferView, 2 on allocation failure, -1 if an exception is pending.

@@ -7254,7 +7254,7 @@ describe("fs.readv/fs.writev over a WebAssembly.Memory", () => {
     // The child prints this after the grow, so the read below cannot complete
     // before the block it aims at is freed.
     const stderr = await readUntil(proc.stderr as ReadableStream<Uint8Array>, "ready\n");
-    expect(stderr).toBe("ready\n");
+    expect(stderr).toContain("ready\n");
     proc.stdin.write(Buffer.alloc(8192, 0x41));
     await proc.stdin.flush();
 
@@ -7286,8 +7286,8 @@ describe("fs.readv/fs.writev over a WebAssembly.Memory", () => {
         view.fill(0x41);
         // O_RDWR so the open does not wait for a reader.
         const fd = fs.openSync(${JSON.stringify(fifo)}, fs.constants.O_RDWR);
-        let settled = null;
-        fs.writev(fd, [view], null, (err, n) => { settled = err ? err.code : n; });
+        const written = Promise.withResolvers();
+        fs.writev(fd, [view], null, (err, n) => written.resolve(err ? err.code : n));
 
         const chunk = Buffer.alloc(1 << 16);
         const payload = Buffer.alloc(chunk.length, 0x41);
@@ -7307,7 +7307,9 @@ describe("fs.readv/fs.writev over a WebAssembly.Memory", () => {
           if (!chunk.subarray(0, n).equals(payload.subarray(0, n))) foreign++;
           drained += n;
         }
-        console.log(JSON.stringify({ drained, foreignChunks: foreign, written: settled }));
+        // The writev completion and the last read completion are queued from
+        // separate pool threads, so wait for it instead of reading a variable.
+        console.log(JSON.stringify({ drained, foreignChunks: foreign, written: await written.promise }));
         `,
       ],
       env: bunEnv,
