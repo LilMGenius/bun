@@ -6941,6 +6941,24 @@ extern "C" JSC::EncodedJSValue Bun__REPL__formatValue(
     return JSC::JSValue::encode(result);
 }
 
+// True when `pin()` does not keep this view's bytes mapped for as long as a
+// borrow lives:
+//
+// - a resizable non-shared ArrayBuffer: `resize()` unmaps the pages it trims.
+// - a `WebAssembly.Memory`: `grow()` on a bounds-checked memory allocates a new
+//   block, copies into it, and frees the old one. JSC detaches a wasm memory's
+//   buffer whatever its pin count ("We allow detaching wasm memory ArrayBuffers
+//   even though they are locked", `ArrayBuffer::detach`).
+//
+// A SharedArrayBuffer, including a shared wasm memory, only ever grows in
+// place, so a borrow of one stays valid.
+static bool pinCannotHold(JSC::JSArrayBufferView* view, JSC::ArrayBuffer* buffer)
+{
+    if (buffer->isShared())
+        return false;
+    return view->isResizableOrGrowableShared() || buffer->isWasmMemory();
+}
+
 // Collects every ArrayBufferView in a JSArray and the (data, byteLength) span
 // of each. Two passes, mirroring Buffer.concat: the first reads every element
 // into a MarkedArgumentBuffer, so any user code an indexed read can run
@@ -6954,6 +6972,10 @@ extern "C" JSC::EncodedJSValue Bun__REPL__formatValue(
 // every pinned element with `JSC__JSValue__unpinArrayBuffer`. SharedArrayBuffer
 // is never detachable and never moves, so it is left unpinned.
 //
+// A pin holds the bytes of most buffers, not of all of them, so `append` is
+// told which elements it cannot hold (`volatileStorage`, see `pinCannotHold`).
+// The caller copies those and points the span at its own memory.
+//
 // Returns 0 on success, 1 if the value is not a JSArray or an element is not
 // an ArrayBufferView, 2 on allocation failure, -1 if an exception is pending.
 extern "C" int32_t Bun__JSArray__collectBufferSpans(
@@ -6961,7 +6983,7 @@ extern "C" int32_t Bun__JSArray__collectBufferSpans(
     JSC::EncodedJSValue encodedValue,
     bool pinBuffers,
     void* ctx,
-    void (*append)(void* ctx, JSC::EncodedJSValue element, void* data, size_t byteLength))
+    void (*append)(void* ctx, JSC::EncodedJSValue element, void* data, size_t byteLength, bool volatileStorage))
 {
     auto& vm = JSC::getVM(globalObject);
     auto scope = DECLARE_THROW_SCOPE(vm);
@@ -6988,6 +7010,7 @@ extern "C" int32_t Bun__JSArray__collectBufferSpans(
         auto* view = dynamicDowncast<JSC::JSArrayBufferView>(values.at(i));
         if (!view)
             return 1;
+        bool volatileStorage = false;
         if (pinBuffers) {
             // possiblySharedBuffer() converts a FastTypedArray (GC-movable
             // storage, no ArrayBuffer yet) into a malloc-backed one and can
@@ -6995,10 +7018,11 @@ extern "C" int32_t Bun__JSArray__collectBufferSpans(
             auto* buf = view->possiblySharedBuffer();
             if (!buf) [[unlikely]]
                 return 2;
+            volatileStorage = pinCannotHold(view, buf);
             if (!buf->isShared())
                 buf->pin();
         }
-        append(ctx, JSC::JSValue::encode(view), view->vector(), view->byteLength());
+        append(ctx, JSC::JSValue::encode(view), view->vector(), view->byteLength(), volatileStorage);
     }
     return 0;
 }

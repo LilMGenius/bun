@@ -946,8 +946,16 @@ mod _async_tasks {
                 scopeguard::guard(core::ptr::from_mut(self), |p| unsafe { Self::destroy(p) });
             // Move `result` out so the `global_object()` `&self` borrow can coexist
             // with consuming it below; the sentinel left behind is dropped in `destroy()`.
-            let result = core::mem::replace(&mut self.result, Err(sys::Error::default()));
             let global_object = self.global_object();
+            // Before the result reaches JS: an argument set whose job read
+            // into memory of its own copies those bytes into the caller's
+            // buffers now.
+            if let Ok(res) = &self.result
+                && let Some(bytes_read) = res.bytes_read()
+            {
+                self.args.write_back(global_object, bytes_read);
+            }
+            let result = core::mem::replace(&mut self.result, Err(sys::Error::default()));
             let success = matches!(result, Ok(_));
             let promise_value = self.promise.value();
             let promise = self.promise.get();
@@ -1013,6 +1021,12 @@ mod _async_tasks {
         fn signal(&self) -> Option<&AbortSignal> {
             None
         }
+        /// Copies what a read produced into the caller's buffers, for an
+        /// argument set whose job had to read into memory of its own. JS
+        /// thread, after the syscall and before the result reaches JS. A no-op
+        /// for every other argument set.
+        #[inline]
+        fn write_back(&mut self, _global: &JSGlobalObject, _bytes_read: u64) {}
     }
 
     /// Forward [`FsArgument`] to the inherent `from_js` each `args::*` struct
@@ -1031,7 +1045,6 @@ mod _async_tasks {
     impl_fs_argument!(
         args::Rename<'static>,
         args::Truncate<'static>,
-        args::FdVectorIo,
         args::FTruncate,
         args::Chown<'static>,
         args::Lutimes<'static>,
@@ -1063,6 +1076,21 @@ mod _async_tasks {
         args::FdataSync,
         args::Fsync,
     );
+    // `readv` and `writev` share this argument set, so `write_back` is written
+    // once for both. It runs for `readv` only: `ret::Writev` is `ret::Write`,
+    // whose `bytes_read()` is `None`.
+    // SAFETY: as for `impl_fs_argument!`.
+    unsafe impl ThreadIsolatedArg for args::FdVectorIo {}
+    impl FsArgument for args::FdVectorIo {
+        #[inline]
+        fn from_js(ctx: &JSGlobalObject, arguments: &mut ArgumentsSlice) -> JsResult<Self> {
+            args::FdVectorIo::from_js(ctx, arguments)
+        }
+        #[inline]
+        fn write_back(&mut self, global: &JSGlobalObject, bytes_read: u64) {
+            self.buffers.write_back(global, bytes_read);
+        }
+    }
     // `ReadFile`/`WriteFile` carry an `AbortSignal` field — opt them in so the
     // `const _ = assert!(…::HAVE_ABORT_SIGNAL)` invariants in `async_` hold and
     // `signal()` exposes it to `AsyncFSTask::run_from_js_thread`.
@@ -1111,6 +1139,14 @@ mod _async_tasks {
     /// Each `ret::*` type implements this by forwarding to its inherent method.
     pub trait FsReturn {
         fn fs_to_js(self, global: &JSGlobalObject) -> JsResult<JSValue>;
+        /// Bytes a read produced, for an operation that fills the caller's
+        /// buffers. `None` for every other one, which is what keeps
+        /// [`FsArgument::write_back`] off the write direction: `ret::Writev`
+        /// is `ret::Write`, which reports nothing.
+        #[inline]
+        fn bytes_read(&self) -> Option<u64> {
+            None
+        }
     }
     impl FsReturn for JSValue {
         #[inline]
@@ -1164,6 +1200,10 @@ mod _async_tasks {
         #[inline]
         fn fs_to_js(self, global: &JSGlobalObject) -> JsResult<JSValue> {
             Ok(self.to_js(global))
+        }
+        #[inline]
+        fn bytes_read(&self) -> Option<u64> {
+            Some(self.bytes_read)
         }
     }
     impl FsReturn for ret::Write {
@@ -1254,6 +1294,14 @@ mod _async_tasks {
             let _dispatch = js.tracker.dispatch(global_object);
 
             let success = this.result.is_ok();
+            // Before the result reaches JS: an argument set whose job read
+            // into memory of its own copies those bytes into the caller's
+            // buffers now.
+            if let Ok(res) = &this.result
+                && let Some(bytes_read) = res.bytes_read()
+            {
+                this.args.write_back(global_object, bytes_read);
+            }
             let promise_value = js.promise.value();
             let promise = js.promise.get();
             let result = match core::mem::replace(&mut this.result, Err(sys::Error::default())) {

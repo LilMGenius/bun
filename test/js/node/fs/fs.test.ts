@@ -7207,3 +7207,160 @@ describe("module init", () => {
     expect(mismatched).toStrictEqual([]);
   });
 });
+
+// `fs.readv` and `fs.writev` pin each element's ArrayBuffer and hand the pool
+// thread the iovec it built. A pin does not keep the bytes of a
+// `WebAssembly.Memory` mapped: `grow()` on a bounds-checked memory allocates a
+// new block, copies into it, and frees the old one, and JSC detaches the old
+// buffer whatever its pin count. Each fixture below takes the fast memory
+// slots first, so the memory it grows is bounds-checked, and gates the syscall
+// on the parent, so the grow always lands while the call is in flight.
+describe("fs.readv/fs.writev over a WebAssembly.Memory", () => {
+  const FAST_SLOTS = `const hold = Array.from({ length: 10 }, () => new WebAssembly.Memory({ initial: 1, maximum: 2 }));`;
+
+  it("readv puts the bytes in the memory, not in the block the grow freed", async () => {
+    // The view comes from `toResizableBuffer()`, so it tracks the memory
+    // instead of detaching. That makes the result observable from JS: the
+    // payload has to appear in the grown memory.
+    await using proc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `
+        const fs = require("node:fs");
+        ${FAST_SLOTS}
+        const mem = new WebAssembly.Memory({ initial: 32, maximum: 40 });
+        const view = new Uint8Array(mem.toResizableBuffer());
+        const { promise, resolve } = Promise.withResolvers();
+        fs.readv(0, [view], null, (err, n) => resolve({ err: err ? err.code : null, n }));
+        mem.grow(2);
+        const victim = new WebAssembly.Memory({ initial: 32, maximum: 40 });
+        process.stderr.write("ready\\n");
+        const { err, n } = await promise;
+        console.log(JSON.stringify({
+          err,
+          n,
+          payloadInMemory: Buffer.from(mem.buffer, 0, 8192).equals(Buffer.alloc(8192, 0x41)),
+          victimUntouched: Buffer.from(victim.buffer).indexOf(0x41) === -1,
+        }));
+        `,
+      ],
+      env: bunEnv,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    // The child prints this after the grow, so the read below cannot complete
+    // before the block it aims at is freed.
+    const stderr = await readUntil(proc.stderr as ReadableStream<Uint8Array>, "ready\n");
+    expect(stderr).toBe("ready\n");
+    proc.stdin.write(Buffer.alloc(8192, 0x41));
+    await proc.stdin.flush();
+
+    const [stdout, exitCode] = await Promise.all([proc.stdout.text(), proc.exited]);
+    expect(JSON.parse(stdout)).toEqual({ err: null, n: 8192, payloadInMemory: true, victimUntouched: true });
+    expect(exitCode).toBe(0);
+  });
+
+  it.skipIf(isWindows)("writev sends the memory's bytes, not what took the block the grow freed", async () => {
+    // A FIFO the child does not drain until after the grow. The write blocks
+    // with about 64 KiB sent, so everything past that is sourced once the old
+    // block is already freed. A `Bun.spawn` pipe would not do: the parent's
+    // loop drains it as the bytes arrive, and the write never blocks.
+    using dir = tempDir("fs-writev-wasm", {});
+    const fifo = join(String(dir), "sink");
+    mkfifo(fifo);
+
+    await using proc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `
+        const fs = require("node:fs");
+        ${FAST_SLOTS}
+        const PAGES = 32;
+        const TOTAL = PAGES * 65536;
+        const mem = new WebAssembly.Memory({ initial: PAGES, maximum: PAGES + 8 });
+        const view = new Uint8Array(mem.toResizableBuffer());
+        view.fill(0x41);
+        // O_RDWR so the open does not wait for a reader.
+        const fd = fs.openSync(${JSON.stringify(fifo)}, fs.constants.O_RDWR);
+        let settled = null;
+        fs.writev(fd, [view], null, (err, n) => { settled = err ? err.code : n; });
+
+        const chunk = Buffer.alloc(1 << 16);
+        const payload = Buffer.alloc(chunk.length, 0x41);
+        const next = () => new Promise((res, rej) =>
+          fs.read(fd, chunk, 0, chunk.length, null, (err, n) => (err ? rej(err) : res(n))));
+
+        // The first chunk proves the pool thread is inside writev(2) with the
+        // range it captured. Growing now frees that range.
+        let drained = await next();
+        let foreign = chunk.subarray(0, drained).equals(payload.subarray(0, drained)) ? 0 : 1;
+        mem.grow(2);
+        new Uint8Array(new WebAssembly.Memory({ initial: PAGES, maximum: PAGES + 8 }).buffer).fill(0x5a);
+
+        while (drained < TOTAL) {
+          const n = await next();
+          if (!n) break;
+          if (!chunk.subarray(0, n).equals(payload.subarray(0, n))) foreign++;
+          drained += n;
+        }
+        console.log(JSON.stringify({ drained, foreignChunks: foreign, written: settled }));
+        `,
+      ],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stderr).toBe("");
+    // Every chunk the child read back is the byte it filled the memory with.
+    expect(JSON.parse(stdout)).toEqual({ drained: 32 * 65536, foreignChunks: 0, written: 32 * 65536 });
+    expect(exitCode).toBe(0);
+  });
+
+  it("readv and writev still round-trip an ordinary buffer", async () => {
+    using dir = tempDir("fs-vector-io", {});
+    const file = join(String(dir), "round-trip.bin");
+    const first = Buffer.alloc(64, 0x61);
+    const second = Buffer.alloc(32, 0x62);
+
+    const out = openSync(file, "w");
+    const written = await new Promise<number>((resolve, reject) =>
+      fs.writev(out, [first, second], null, (err, n) => (err ? reject(err) : resolve(n))),
+    );
+    closeSync(out);
+    expect(written).toBe(96);
+
+    const into = [Buffer.alloc(64), Buffer.alloc(32)];
+    const input = openSync(file, "r");
+    const read = await new Promise<number>((resolve, reject) =>
+      fs.readv(input, into, null, (err, n) => (err ? reject(err) : resolve(n))),
+    );
+    closeSync(input);
+    expect({ read, first: into[0].equals(first), second: into[1].equals(second) }).toEqual({
+      read: 96,
+      first: true,
+      second: true,
+    });
+  });
+});
+
+/// Reads `stream` until `marker` has arrived, and returns what was read.
+async function readUntil(stream: ReadableStream<Uint8Array>, marker: string): Promise<string> {
+  const reader = stream.getReader();
+  let seen = "";
+  try {
+    while (!seen.includes(marker)) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      seen += Buffer.from(value).toString();
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return seen;
+}
