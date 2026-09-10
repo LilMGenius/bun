@@ -327,6 +327,13 @@ struct us_socket_t {
    * us_socket_write_check_error). Reset by any send that makes progress.
    * Lives in the pad-to-pointer gap before `group`, so it costs nothing. */
   unsigned char unclassified_send_failures;
+  /* The platform error code (errno on POSIX, WSA code on Windows) of a send()
+   * the kernel rejected outright, recorded by us_socket_raw_write. The TLS
+   * layer sends from inside the write BIO and from its spill/batch flushes,
+   * where a failure is folded to "the wire blocked" and the code cannot ride
+   * the return value out to the caller. us_socket_write_check_error reports it
+   * and clears it. Fits in the tail padding, so the struct does not grow. */
+  int fatal_send_error;
 
   struct us_socket_group_t *group;
   /* NULL for plain TCP. Direct BoringSSL `SSL*`; set by us_internal_ssl_attach

@@ -510,6 +510,7 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int eof, in
                         s->flags.adopted = 0;
                         s->flags.last_write_failed = 0;
                         s->unclassified_send_failures = 0;
+                        s->fatal_send_error = 0;
                         s->read_eof = 0;
 
                         /* We always use nodelay */
