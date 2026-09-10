@@ -946,16 +946,19 @@ mod _async_tasks {
                 scopeguard::guard(core::ptr::from_mut(self), |p| unsafe { Self::destroy(p) });
             // Move `result` out so the `global_object()` `&self` borrow can coexist
             // with consuming it below; the sentinel left behind is dropped in `destroy()`.
-            let global_object = self.global_object();
             // Before the result reaches JS: an argument set whose job read
             // into memory of its own copies those bytes into the caller's
-            // buffers now.
+            // buffers now. `self.global_object.get()` rather than
+            // `self.global_object()`, so the borrow covers that field alone
+            // and leaves `self.args` free to take mutably.
             if let Ok(res) = &self.result
                 && let Some(bytes_read) = res.bytes_read()
             {
-                self.args.write_back(global_object, bytes_read);
+                let global = self.global_object.get();
+                self.args.write_back(global, bytes_read);
             }
             let result = core::mem::replace(&mut self.result, Err(sys::Error::default()));
+            let global_object = self.global_object();
             let success = matches!(result, Ok(_));
             let promise_value = self.promise.value();
             let promise = self.promise.get();
