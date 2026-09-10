@@ -151,6 +151,23 @@ impl BlobOrStringOrBuffer {
         Self::from_js_maybe_file(global, value, FileBlobs::Reject)
     }
 
+    /// [`from_js`](Self::from_js) for a synchronous reader that must see one
+    /// value of each byte: see
+    /// [`StringOrBuffer::copy_if_shared_or_resizable`]. A `Blob` owns its
+    /// bytes and needs no copy.
+    pub(crate) fn from_js_stable(
+        global: &JSGlobalObject,
+        value: JSValue,
+    ) -> JsResult<Option<BlobOrStringOrBuffer>> {
+        let mut parsed = Self::from_js(global, value)?;
+        if let Some(Self::StringOrBuffer(input)) = &mut parsed
+            && !input.copy_if_shared_or_resizable()
+        {
+            return Err(global.throw_out_of_memory());
+        }
+        Ok(parsed)
+    }
+
     /// Like [`from_js_with_encoding_value_allow_request_response`] but takes an
     /// already-parsed [`Encoding`], so callers that must inspect the encoding
     /// first (e.g. to validate odd-length hex) don't coerce `encoding_value`
@@ -315,6 +332,33 @@ impl<'a> StringOrBuffer<'a> {
 }
 
 impl StringOrBuffer<'_> {
+    /// Replace a view whose bytes can change with a private copy of them.
+    ///
+    /// Another thread writes a `SharedArrayBuffer` for the whole native call.
+    /// A resizable `ArrayBuffer` shrinks when the call runs JS again, which
+    /// unmaps the pages the view points at. A reader that reads a byte twice,
+    /// or that sizes an output in one pass and fills it in another, reads past
+    /// the end of its own input when either happens.
+    ///
+    /// Returns `false` when the copy cannot be allocated.
+    #[must_use]
+    pub(crate) fn copy_if_shared_or_resizable(&mut self) -> bool {
+        let Self::Buffer(buffer) = self else {
+            return true;
+        };
+        if !buffer.buffer.shared && !buffer.buffer.resizable {
+            return true;
+        }
+        let bytes = buffer.slice();
+        let mut copy = Vec::new();
+        if copy.try_reserve_exact(bytes.len()).is_err() {
+            return false;
+        }
+        copy.extend_from_slice(bytes);
+        *self = Self::owned(copy);
+        true
+    }
+
     pub fn into_js(self, ctx: &JSGlobalObject) -> JsResult<JSValue> {
         match self {
             Self::ThreadIsolatedString(str) | Self::String(str) => str.into_js(ctx),
@@ -452,6 +496,22 @@ impl StringOrBuffer<'static> {
     #[inline]
     pub fn from_js(global: &JSGlobalObject, value: JSValue) -> JsResult<Option<Self>> {
         Self::from_js_maybe_async(global, value, Flavor::Sync, StringObjects::Allow)
+    }
+
+    /// [`from_js`](Self::from_js) for a synchronous reader that must see one
+    /// value of each byte: see [`copy_if_shared_or_resizable`](Self::copy_if_shared_or_resizable).
+    #[inline]
+    pub(crate) fn from_js_stable(
+        global: &JSGlobalObject,
+        value: JSValue,
+    ) -> JsResult<Option<Self>> {
+        let mut parsed = Self::from_js(global, value)?;
+        if let Some(input) = &mut parsed
+            && !input.copy_if_shared_or_resizable()
+        {
+            return Err(global.throw_out_of_memory());
+        }
+        Ok(parsed)
     }
 
     /// [`from_js`](Self::from_js) for a work-pool job that reads the bytes itself: strings thread-isolated, buffers pinned and GC-rooted, a resizable buffer copied ([`PinnedArrayBuffer::copy_if_resizable`]).

@@ -1271,7 +1271,7 @@ impl JSTranspiler {
             return Err(global.throw_invalid_argument_type("scan", "code", "string or Uint8Array"));
         };
 
-        let Some(code_holder) = StringOrBuffer::from_js(global, code_arg)? else {
+        let Some(code_holder) = StringOrBuffer::from_js_stable(global, code_arg)? else {
             return Err(global.throw_invalid_argument_type("scan", "code", "string or Uint8Array"));
         };
         let code = code_holder.slice();
@@ -1412,7 +1412,7 @@ impl JSTranspiler {
         };
 
         let arena = Arena::new();
-        let Some(code_holder) = StringOrBuffer::from_js(global, code_arg)? else {
+        let Some(code_holder) = StringOrBuffer::from_js_stable(global, code_arg)? else {
             return Err(global.throw_invalid_argument_type(
                 "transformSync",
                 "code",
@@ -1615,7 +1615,7 @@ impl JSTranspiler {
             ));
         };
 
-        let Some(code_holder) = StringOrBuffer::from_js(global, code_arg)? else {
+        let Some(code_holder) = StringOrBuffer::from_js_stable(global, code_arg)? else {
             return Err(global.throw_invalid_argument_type(
                 "scanImports",
                 "code",

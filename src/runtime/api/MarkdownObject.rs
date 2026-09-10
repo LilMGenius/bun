@@ -64,7 +64,8 @@ fn parser_err_to_js(
     }
 }
 
-/// Pins a buffer input for the render, which can re-enter JS; `None` for a string.
+/// Pins a buffer input for the render, which can re-enter JS; `None` for a
+/// string, and for a shared or resizable buffer `from_js_stable` copied.
 fn pin(global: &JSGlobalObject, input: &StringOrBuffer) -> JsResult<Option<PinnedArrayBuffer>> {
     let StringOrBuffer::Buffer(buffer) = input else {
         return Ok(None);
@@ -123,7 +124,7 @@ pub(crate) fn render_to_ansi(
             .throw_invalid_arguments(format_args!("Expected a string or buffer to render")));
     }
 
-    let Some(buffer) = StringOrBuffer::from_js(global_this, input_value)? else {
+    let Some(buffer) = StringOrBuffer::from_js_stable(global_this, input_value)? else {
         return Err(global_this
             .throw_invalid_arguments(format_args!("Expected a string or buffer to render")));
     };
@@ -191,7 +192,7 @@ fn render_to_html(global_this: &JSGlobalObject, callframe: &CallFrame) -> JsResu
             .throw_invalid_arguments(format_args!("Expected a string or buffer to render")));
     }
 
-    let Some(buffer) = StringOrBuffer::from_js(global_this, input_value)? else {
+    let Some(buffer) = StringOrBuffer::from_js_stable(global_this, input_value)? else {
         return Err(global_this
             .throw_invalid_arguments(format_args!("Expected a string or buffer to render")));
     };
@@ -294,7 +295,7 @@ fn render(global_this: &JSGlobalObject, callframe: &CallFrame) -> JsResult<JSVal
             .throw_invalid_arguments(format_args!("Expected a string or buffer to render")));
     }
 
-    let Some(buffer) = StringOrBuffer::from_js(global_this, input_value)? else {
+    let Some(buffer) = StringOrBuffer::from_js_stable(global_this, input_value)? else {
         return Err(global_this
             .throw_invalid_arguments(format_args!("Expected a string or buffer to render")));
     };
@@ -387,7 +388,7 @@ fn render_ast(
             .throw_invalid_arguments(format_args!("Expected a string or buffer to render")));
     }
 
-    let Some(buffer) = StringOrBuffer::from_js(global_this, input_value)? else {
+    let Some(buffer) = StringOrBuffer::from_js_stable(global_this, input_value)? else {
         return Err(global_this
             .throw_invalid_arguments(format_args!("Expected a string or buffer to render")));
     };
