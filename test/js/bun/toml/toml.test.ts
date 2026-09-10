@@ -926,6 +926,56 @@ describe("TOML.stringify", () => {
     Bun.gc(true);
     expect(TOML.parse(TOML.stringify({ ok: true }))).toEqual({ ok: true });
   });
+
+  test("a long header path stays in root-first order", () => {
+    const segments = Array.from({ length: 200 }, (_, i) => "k" + i);
+    let table: object = {};
+    for (let i = segments.length; i-- > 0; ) table = { [segments[i]]: table };
+    expect(TOML.stringify(table)).toBe(`[${segments.join(".")}]\n`);
+  });
+
+  test("a table nested to the recursion limit reports the limit instead of crashing", async () => {
+    // The deepest table writes one header that holds its whole path. The walk
+    // over that path recursed once per segment, on top of the one frame per
+    // level the stack check had already accounted for, so it ran off the stack
+    // and the process died with SIGSEGV. That happens at a depth just under
+    // the limit the stack check allows, and the limit follows the frame sizes
+    // of the build (a debug+ASAN frame is several times a release frame), so
+    // the child searches for it: every probe near the limit probes the crash.
+    const fixture = `
+      const stringifies = depth => {
+        let table = {};
+        for (let i = 0; i < depth; i++) table = { a: table };
+        try {
+          Bun.TOML.stringify(table);
+          return true;
+        } catch (e) {
+          if (!(e instanceof RangeError)) throw e;
+          return false;
+        }
+      };
+      let accepted = 0;
+      let rejected = 64;
+      while (rejected < 1 << 20 && stringifies(rejected)) {
+        accepted = rejected;
+        rejected *= 2;
+      }
+      while (rejected - accepted > 1) {
+        const probe = (accepted + rejected) >> 1;
+        if (stringifies(probe)) accepted = probe;
+        else rejected = probe;
+      }
+      console.log("limit " + accepted);
+    `;
+    await using proc = Bun.spawn({ cmd: [bunExe(), "-e", fixture], env: bunEnv, stderr: "pipe" });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect({ stdout: stdout.replace(/\d+/, "N"), stderr, exitCode, signalCode: proc.signalCode }).toEqual({
+      stdout: "limit N\n",
+      stderr: "",
+      exitCode: 0,
+      signalCode: null,
+    });
+  });
 });
 
 // The TOML.stringify suite above covers parse(stringify(jsValue)). These cover
